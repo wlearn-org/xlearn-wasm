@@ -1,0 +1,44 @@
+{
+  "name": "@wlearn/xlearn",
+  "version": "0.1.0",
+  "description": "xLearn (LR/FM/FFM) compiled to WebAssembly -- factorization machines for CTR and sparse data in browsers and Node.js",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src/",
+    "wasm/",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node test/test.js",
+    "build": "bash scripts/build-wasm.sh",
+    "verify": "bash scripts/verify-exports.sh"
+  },
+  "dependencies": {
+    "@wlearn/types": "file:../wlearn/packages/types",
+    "@wlearn/core": "file:../wlearn/packages/core"
+  },
+  "keywords": [
+    "xlearn",
+    "factorization-machine",
+    "fm",
+    "ffm",
+    "logistic-regression",
+    "ctr",
+    "machine-learning",
+    "wasm",
+    "webassembly",
+    "wlearn"
+  ],
+  "author": "Anton Zemlyansky",
+  "license": "Apache-2.0"
+}

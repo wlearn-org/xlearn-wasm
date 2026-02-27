@@ -1,0 +1,4 @@
+node_modules/
+wasm/*.cjs
+wasm/BUILD_INFO
+package-lock.json
