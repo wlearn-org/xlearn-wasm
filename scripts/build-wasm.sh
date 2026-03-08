@@ -86,7 +86,7 @@ em++ \
   -I "${UPSTREAM_DIR}" \
   -I "${UPSTREAM_DIR}/src" \
   -include "${PROJECT_DIR}/csrc/thread_pool_wasm.h" \
-  -o "${OUTPUT_DIR}/xlearn.cjs" \
+  -o "${OUTPUT_DIR}/xlearn.js" \
   -std=c++11 \
   -msimd128 -msse3 \
   -s MODULARIZE=1 \
@@ -118,5 +118,5 @@ wasm_embedded: true
 EOF
 
 echo "=== Build complete ==="
-ls -lh "${OUTPUT_DIR}/xlearn.cjs"
+ls -lh "${OUTPUT_DIR}/xlearn.js"
 cat "${OUTPUT_DIR}/BUILD_INFO"

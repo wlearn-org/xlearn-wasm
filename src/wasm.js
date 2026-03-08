@@ -8,7 +8,7 @@ async function loadXLearn(options = {}) {
   if (loading) return loading
 
   loading = (async () => {
-    const createXLearn = require('../wasm/xlearn.cjs')
+    const createXLearn = require('../wasm/xlearn.js')
     wasmModule = await createXLearn(options)
     return wasmModule
   })()
