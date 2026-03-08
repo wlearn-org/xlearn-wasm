@@ -2,15 +2,19 @@
   "name": "@wlearn/xlearn",
   "version": "0.1.0",
   "description": "xLearn (LR/FM/FFM) compiled to WebAssembly -- factorization machines for CTR and sparse data in browsers and Node.js",
-  "type": "module",
+  "type": "commonjs",
   "main": "src/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": {
+      "require": "./src/index.js",
+      "default": "./src/index.js"
+    }
   },
   "files": [
     "src/",
     "wasm/",
     "LICENSE",
+    "NOTICE",
     "README.md",
     "CHANGELOG.md"
   ],

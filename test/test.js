@@ -1,4 +1,4 @@
-import { decodeBundle, load as coreLoad } from '@wlearn/core'
+const { decodeBundle, load: coreLoad } = require('@wlearn/core')
 
 let passed = 0
 let failed = 0
@@ -79,12 +79,14 @@ function toCSR(X) {
   }
 }
 
+async function main() {
+
 const {
   loadXLearn,
   XLearnLRClassifier, XLearnLRRegressor,
   XLearnFMClassifier, XLearnFMRegressor,
   XLearnFFMClassifier, XLearnFFMRegressor
-} = await import('../src/index.js')
+} = require('../src/index.js')
 
 // ============================================================
 // WASM loading
@@ -98,7 +100,7 @@ await test('WASM module loads', async () => {
 })
 
 await test('get_last_error returns string', async () => {
-  const { getWasm } = await import('../src/wasm.js')
+  const { getWasm } = require('../src/wasm.js')
   const wasm = getWasm()
   const err = wasm.ccall('wl_xl_get_last_error', 'string', [], [])
   assert(typeof err === 'string', `expected string, got ${typeof err}`)
@@ -864,3 +866,7 @@ await test('fit throws after dispose', async () => {
 // ============================================================
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`)
 process.exit(failed > 0 ? 1 : 0)
+
+} // end main
+
+main()

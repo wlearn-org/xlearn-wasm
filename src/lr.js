@@ -1,7 +1,7 @@
-import { XLearnBase, LOAD_SENTINEL } from './base.js'
-import { register } from '@wlearn/core'
+const { XLearnBase, LOAD_SENTINEL } = require('./base.js')
+const { register } = require('@wlearn/core')
 
-export class XLearnLRClassifier extends XLearnBase {
+class XLearnLRClassifier extends XLearnBase {
   static async create(params = {}) {
     return XLearnBase._create('linear', 'binary', params, XLearnLRClassifier)
   }
@@ -34,7 +34,7 @@ export class XLearnLRClassifier extends XLearnBase {
   }
 }
 
-export class XLearnLRRegressor extends XLearnBase {
+class XLearnLRRegressor extends XLearnBase {
   static async create(params = {}) {
     return XLearnBase._create('linear', 'reg', params, XLearnLRRegressor)
   }
@@ -69,3 +69,5 @@ export class XLearnLRRegressor extends XLearnBase {
 
 register('wlearn.xlearn.lr.classifier@1', (m, t, b) => XLearnLRClassifier._fromBundle(m, t, b))
 register('wlearn.xlearn.lr.regressor@1', (m, t, b) => XLearnLRRegressor._fromBundle(m, t, b))
+
+module.exports = { XLearnLRClassifier, XLearnLRRegressor }

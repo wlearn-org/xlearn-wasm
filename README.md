@@ -2,7 +2,7 @@
 
 xLearn v0.44 compiled to WebAssembly. Logistic regression, factorization machines (FM), and field-aware factorization machines (FFM) in browsers and Node.js.
 
-Based on [xLearn v0.44](https://github.com/aksnzhy/xlearn) (Apache-2.0). Zero dependencies beyond `@wlearn/core`. ESM.
+Based on [xLearn v0.44](https://github.com/aksnzhy/xlearn) (Apache-2.0). Zero dependencies beyond `@wlearn/core`. CommonJS.
 
 ## Install
 
@@ -13,7 +13,7 @@ npm install @wlearn/xlearn
 ## Quick start
 
 ```js
-import { XLearnFMClassifier } from '@wlearn/xlearn'
+const { XLearnFMClassifier } = require('@wlearn/xlearn')
 
 const model = await XLearnFMClassifier.create({
   epoch: 10,
@@ -61,7 +61,7 @@ All classes share the same API. Binary classification only (no multiclass).
 FFM requires a feature-to-field mapping. Pass `featureFields` as an `Int32Array` where each entry maps a feature index to its field ID:
 
 ```js
-import { XLearnFFMClassifier } from '@wlearn/xlearn'
+const { XLearnFFMClassifier } = require('@wlearn/xlearn')
 
 // Features 0-2 belong to field 0, features 3-5 belong to field 1
 const featureFields = new Int32Array([0, 0, 0, 1, 1, 1])

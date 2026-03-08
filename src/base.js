@@ -1,10 +1,10 @@
-import { getWasm, loadXLearn } from './wasm.js'
-import {
+const { getWasm, loadXLearn } = require('./wasm.js')
+const {
   normalizeX, normalizeY,
   encodeBundle, decodeBundle,
   register,
   DisposedError, NotFittedError
-} from '@wlearn/core'
+} = require('@wlearn/core')
 
 // FinalizationRegistry safety net
 const leakRegistry = typeof FinalizationRegistry !== 'undefined'
@@ -54,7 +54,7 @@ function sigmoid(x) {
 
 // --- XLearnBase ---
 
-export class XLearnBase {
+class XLearnBase {
   #handle = null
   #handleRef = null
   #modelBytes = null
@@ -628,4 +628,4 @@ export class XLearnBase {
   }
 }
 
-export { LOAD_SENTINEL }
+module.exports = { XLearnBase, LOAD_SENTINEL }
