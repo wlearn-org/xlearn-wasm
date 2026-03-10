@@ -13,9 +13,10 @@ npm install @wlearn/xlearn
 ## Quick start
 
 ```js
-const { XLearnFMClassifier } = require('@wlearn/xlearn')
+const { XLearnFM } = require('@wlearn/xlearn')
 
-const model = await XLearnFMClassifier.create({
+const model = await XLearnFM.create({
+  task: 'classification',  // or 'regression'; auto-detected from labels if omitted
   epoch: 10,
   k: 4,
   lr: 0.2
@@ -43,18 +44,15 @@ model2.dispose()
 
 ## Model types
 
-Six model classes covering three algorithms and two tasks:
+Three unified model classes (recommended), plus six split classes for backward compatibility:
 
-| Class | Algorithm | Task |
-|-------|-----------|------|
-| `XLearnLRClassifier` | Logistic regression | Binary classification |
-| `XLearnLRRegressor` | Linear regression | Regression |
-| `XLearnFMClassifier` | Factorization machine | Binary classification |
-| `XLearnFMRegressor` | Factorization machine | Regression |
-| `XLearnFFMClassifier` | Field-aware FM | Binary classification |
-| `XLearnFFMRegressor` | Field-aware FM | Regression |
+| Unified Class | Algorithm | Split Classes |
+|---------------|-----------|---------------|
+| `XLearnLR` | Logistic / linear regression | `XLearnLRClassifier`, `XLearnLRRegressor` |
+| `XLearnFM` | Factorization machine | `XLearnFMClassifier`, `XLearnFMRegressor` |
+| `XLearnFFM` | Field-aware FM | `XLearnFFMClassifier`, `XLearnFFMRegressor` |
 
-All classes share the same API. Binary classification only (no multiclass).
+Unified classes accept `task: 'classification'` or `task: 'regression'` and auto-detect from labels if omitted. Binary classification only (no multiclass).
 
 ## FFM with field mapping
 

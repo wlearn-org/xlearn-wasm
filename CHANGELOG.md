@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- Add unified model classes: `XLearnLR`, `XLearnFM`, `XLearnFFM` via `createModelClass`
+- Unified classes accept `task` parameter and auto-detect from labels
+- Original split classes (`XLearnLRClassifier`, etc.) still exported for backward compatibility
+
 ## 0.1.0 (unreleased)
 
 - Initial release
