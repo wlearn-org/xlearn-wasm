@@ -2,7 +2,7 @@
 
 xLearn v0.44 compiled to WebAssembly. Logistic regression, factorization machines (FM), and field-aware factorization machines (FFM) in browsers and Node.js.
 
-Based on [xLearn v0.44](https://github.com/aksnzhy/xlearn) (Apache-2.0). Zero dependencies beyond `@wlearn/core`. CommonJS.
+Part of [wlearn](https://wlearn.org) ([GitHub](https://github.com/wlearn-org), [all packages](https://github.com/wlearn-org/wlearn#repository-structure)). Based on [xLearn v0.44](https://github.com/aksnzhy/xlearn) (Apache-2.0). Zero dependencies beyond `@wlearn/core`. CommonJS.
 
 ## Install
 
