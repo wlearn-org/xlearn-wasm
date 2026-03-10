@@ -1,4 +1,5 @@
 node_modules/
 wasm/*.cjs
+dist/
 wasm/BUILD_INFO
 package-lock.json

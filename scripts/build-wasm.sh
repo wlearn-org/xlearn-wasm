@@ -91,6 +91,7 @@ em++ \
   -msimd128 -msse3 \
   -s MODULARIZE=1 \
   -s SINGLE_FILE=1 \
+  -s SINGLE_FILE_BINARY_ENCODE=0 \
   -s EXPORT_NAME=createXLearn \
   -s FORCE_FILESYSTEM=1 \
   -s EXPORTED_FUNCTIONS="${EXPORTED_FUNCTIONS}" \
