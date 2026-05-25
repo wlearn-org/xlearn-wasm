@@ -3,3 +3,4 @@ wasm/*.cjs
 dist/
 wasm/BUILD_INFO
 package-lock.json
+build/

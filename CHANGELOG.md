@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0
+- Depend on the CommonJS `@wlearn/core` release
+- Add package homepage and GitHub issue metadata
 
 - Add unified model classes: `XLearnLR`, `XLearnFM`, `XLearnFFM` via `createModelClass`
 - Unified classes accept `task` parameter and auto-detect from labels

@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 UPSTREAM_DIR="${PROJECT_DIR}/upstream/xlearn"
 OUTPUT_DIR="${PROJECT_DIR}/wasm"
+PATCH_DIR="${PROJECT_DIR}/build/xlearn-patched"
 
 # Verify prerequisites
 if ! command -v em++ &> /dev/null; then
@@ -24,25 +25,29 @@ fi
 
 echo "=== Applying patches ==="
 
+# Patch copies under build/ so the upstream submodule stays clean.
+mkdir -p "${PATCH_DIR}/src/solver" "${PATCH_DIR}/src/base"
+cp "${UPSTREAM_DIR}/src/solver/solver.cc" "${PATCH_DIR}/src/solver/solver.cc"
+cp "${UPSTREAM_DIR}/src/solver/checker.cc" "${PATCH_DIR}/src/solver/checker.cc"
+cp "${UPSTREAM_DIR}/src/base/file_util.h" "${PATCH_DIR}/src/base/file_util.h"
+
 # Patch 1: Replace exit() with throw in solver.cc and checker.cc
 # (exit() would kill the WASM process; throw gets caught by API_BEGIN/API_END)
-cd "$UPSTREAM_DIR"
-if grep -q 'exit(0)' src/solver/solver.cc 2>/dev/null; then
+if grep -q 'exit(0)' "${PATCH_DIR}/src/solver/solver.cc" 2>/dev/null; then
   echo "  Patching exit() -> throw in solver.cc"
-  sed -i 's/exit(0)/throw std::runtime_error("xLearn parameter check failed")/g' src/solver/solver.cc
-  sed -i 's/exit(1)/throw std::runtime_error("xLearn argument error")/g' src/solver/solver.cc
+  sed -i 's/exit(0)/throw std::runtime_error("xLearn parameter check failed")/g' "${PATCH_DIR}/src/solver/solver.cc"
+  sed -i 's/exit(1)/throw std::runtime_error("xLearn argument error")/g' "${PATCH_DIR}/src/solver/solver.cc"
 fi
-if grep -q 'exit(0)' src/solver/checker.cc 2>/dev/null; then
+if grep -q 'exit(0)' "${PATCH_DIR}/src/solver/checker.cc" 2>/dev/null; then
   echo "  Patching exit() -> throw in checker.cc"
-  sed -i 's/exit(0)/throw std::runtime_error("xLearn checker failed")/g' src/solver/checker.cc
+  sed -i 's/exit(0)/throw std::runtime_error("xLearn checker failed")/g' "${PATCH_DIR}/src/solver/checker.cc"
 fi
 
 # Patch 2: Fix std::min type mismatch in file_util.h (uint32 vs long)
-if grep -q 'pos + kChunkSize, end' src/base/file_util.h 2>/dev/null; then
+if grep -q 'pos + kChunkSize, end' "${PATCH_DIR}/src/base/file_util.h" 2>/dev/null; then
   echo "  Patching std::min type mismatch in file_util.h"
-  sed -i 's/std::min(pos + kChunkSize, end)/std::min(pos + (long)kChunkSize, end)/g' src/base/file_util.h
+  sed -i 's/std::min(pos + kChunkSize, end)/std::min(pos + (long)kChunkSize, end)/g' "${PATCH_DIR}/src/base/file_util.h"
 fi
-cd "$PROJECT_DIR"
 
 echo "=== Compiling WASM ==="
 mkdir -p "$OUTPUT_DIR"
@@ -70,9 +75,9 @@ SOURCES=(
   "${UPSTREAM_DIR}/src/score/fm_score.cc"
   "${UPSTREAM_DIR}/src/score/linear_score.cc"
   "${UPSTREAM_DIR}/src/score/score_function.cc"
-  "${UPSTREAM_DIR}/src/solver/checker.cc"
+  "${PATCH_DIR}/src/solver/checker.cc"
   "${UPSTREAM_DIR}/src/solver/inference.cc"
-  "${UPSTREAM_DIR}/src/solver/solver.cc"
+  "${PATCH_DIR}/src/solver/solver.cc"
   "${UPSTREAM_DIR}/src/solver/trainer.cc"
 )
 
@@ -83,6 +88,8 @@ EXPORTED_RUNTIME_METHODS='["ccall","getValue","setValue","HEAPF32","HEAPU8"]'
 em++ \
   "${SOURCES[@]}" \
   -I "${PROJECT_DIR}/csrc" \
+  -I "${PATCH_DIR}" \
+  -I "${PATCH_DIR}/src" \
   -I "${UPSTREAM_DIR}" \
   -I "${UPSTREAM_DIR}/src" \
   -include "${PROJECT_DIR}/csrc/thread_pool_wasm.h" \
