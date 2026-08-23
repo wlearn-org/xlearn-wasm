@@ -1,7 +1,7 @@
 const { getWasm, loadXLearn } = require('./wasm.js')
 const {
   normalizeX, normalizeY,
-  encodeBundle, decodeBundle,
+  encodeBundle, validateBundle,
   register,
   DisposedError, NotFittedError
 } = require('@wlearn/core')
@@ -52,6 +52,83 @@ function sigmoid(x) {
   return e / (1 + e)
 }
 
+function parseModelHeader(bytes) {
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+  const decoder = new TextDecoder('ascii', { fatal: true })
+  let offset = 0
+  const readU32 = name => {
+    if (offset > data.byteLength - 4) throw new Error(`xLearn model header is truncated before ${name}`)
+    const value = view.getUint32(offset, true)
+    offset += 4
+    return value
+  }
+  const readString = name => {
+    const length = readU32(`${name} length`)
+    if (length < 1 || length > 64 || offset > data.byteLength - length) {
+      throw new Error(`xLearn model header has an invalid ${name}`)
+    }
+    const value = decoder.decode(data.subarray(offset, offset + length))
+    offset += length
+    return value
+  }
+  const algo = readString('score function')
+  const loss = readString('loss function')
+  const nFeatures = readU32('feature count')
+  const nFields = readU32('field count')
+  const nFactors = readU32('factor count')
+  const auxSize = readU32('auxiliary parameter count')
+  const nWeights = readU32('linear weight count')
+  const nFactorsStored = algo === 'linear' ? 0 : readU32('latent factor count')
+  if (!['linear', 'fm', 'ffm'].includes(algo) ||
+      !['cross-entropy', 'squared'].includes(loss) || nFeatures < 1) {
+    throw new Error('xLearn model header has unsupported identity fields')
+  }
+  if (auxSize < 1 ||
+      (algo === 'linear' && nFields !== 0) ||
+      (algo === 'fm' && nFields !== 0) ||
+      (algo !== 'linear' && nFactors < 1) ||
+      (algo === 'ffm' && nFields < 1)) {
+    throw new Error('xLearn model header has invalid dimensions')
+  }
+
+  const checkedProduct = (name, ...values) => {
+    let product = 1
+    for (const value of values) {
+      if (value < 1 || product > Math.floor(0xffffffff / value)) {
+        throw new Error(`xLearn model ${name} exceeds uint32 limits`)
+      }
+      product *= value
+    }
+    return product
+  }
+  const expectedWeights = checkedProduct('weight count', nFeatures, auxSize)
+  if (nWeights !== expectedWeights) {
+    throw new Error('xLearn model linear weight count is inconsistent')
+  }
+
+  let expectedFactors = 0
+  if (algo !== 'linear') {
+    const alignedFactors = Math.ceil(nFactors / 4) * 4
+    expectedFactors = algo === 'fm'
+      ? checkedProduct('latent factor count', nFeatures, alignedFactors, auxSize)
+      : checkedProduct('latent factor count', nFeatures, nFields, alignedFactors, auxSize)
+    if (nFactorsStored !== expectedFactors) {
+      throw new Error('xLearn model latent factor count is inconsistent')
+    }
+  }
+
+  const floatCount = expectedWeights + auxSize + expectedFactors
+  if (!Number.isSafeInteger(floatCount) ||
+      offset + floatCount * Float32Array.BYTES_PER_ELEMENT !== data.byteLength) {
+    throw new Error('xLearn model byte length is inconsistent with its parameter counts')
+  }
+  return {
+    algo, loss, nFeatures, nFields, nFactors, auxSize,
+    nWeights, nFactorsStored
+  }
+}
+
 // --- XLearnBase ---
 
 class XLearnBase {
@@ -65,6 +142,7 @@ class XLearnBase {
   #nClasses = 0
   #classes = null
   #featureFields = null
+  #fittedSeed = 1
   #fitted = false
   #freed = false
 
@@ -95,7 +173,45 @@ class XLearnBase {
     this.#ensureNotDisposed()
     const wasm = getWasm()
 
-    // Dispose previous handle if refitting
+    // Validate the complete JS-side boundary before releasing a fitted model or
+    // passing pointers to C. The C DMatrix constructors read one label per row
+    // and one field ID per feature.
+    const input = this.#prepareMatrixInput(X)
+    const yNorm = normalizeY(y)
+    const yF64 = yNorm instanceof Float64Array ? yNorm : new Float64Array(yNorm)
+    if (yF64.length !== input.rows) {
+      throw new Error(`y length (${yF64.length}) does not match X rows (${input.rows})`)
+    }
+
+    // xLearn's binary loss requires {-1,+1}. Keep sorted public int32 labels
+    // separately and map them only at the DMatrix boundary.
+    let classes = null
+    if (this.#task === 'binary') {
+      const classSet = new Set()
+      for (let i = 0; i < yF64.length; i++) {
+        const value = yF64[i]
+        if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
+          throw new Error(`Classifier labels must be int32 values, got ${value} at index ${i}`)
+        }
+        classSet.add(value)
+      }
+      if (classSet.size !== 2) {
+        throw new Error(`Binary classification requires exactly 2 classes, got ${classSet.size}`)
+      }
+      const sorted = [...classSet].sort((a, b) => a - b)
+      classes = new Int32Array(sorted)
+    } else {
+      for (let i = 0; i < yF64.length; i++) {
+        if (!Number.isFinite(yF64[i])) {
+          throw new Error(`Regression labels must be finite, got ${yF64[i]} at index ${i}`)
+        }
+      }
+    }
+
+    const featureFields = this.#prepareFeatureFields(input.cols)
+    const seed = this.#resolvedSeed()
+
+    // Validation succeeded. A refit may now release the prior native model.
     if (this.#handle) {
       wasm._wl_xl_free_handle(this.#handle)
       this.#handle = null
@@ -104,34 +220,20 @@ class XLearnBase {
     }
     this.#modelBytes = null
     this.#fitted = false
+    this.#nClasses = classes ? 2 : 0
+    this.#classes = classes
+    this.#featureFields = featureFields
+    this.#fittedSeed = seed
 
-    // Normalize labels
-    const yNorm = normalizeY(y)
-    const yF64 = yNorm instanceof Float64Array ? yNorm : new Float64Array(yNorm)
-
-    // Build DMatrix (CSR or dense)
-    let dmatrix, rows, cols
-    if (isCSR(X)) {
-      ({ dmatrix, rows, cols } = this.#buildCSRDMatrix(wasm, X, yF64))
+    // Build DMatrix (CSR or dense) from the already validated input.
+    let dmatrix
+    if (input.csr) {
+      ({ dmatrix } = this.#buildCSRDMatrix(wasm, input.matrix, yF64))
     } else {
-      ({ dmatrix, rows, cols } = this.#buildDenseDMatrix(wasm, X, yF64))
+      ({ dmatrix } = this.#buildDenseDMatrix(wasm, input.matrix, yF64))
     }
 
-    if (yF64.length !== rows) {
-      wasm._wl_xl_free_dmatrix(dmatrix)
-      throw new Error(`y length (${yF64.length}) does not match X rows (${rows})`)
-    }
-
-    this.#nFeatures = cols
-
-    // Detect classes for classifier
-    if (this.#task === 'binary') {
-      const classSet = new Set()
-      for (let i = 0; i < yF64.length; i++) classSet.add(yF64[i])
-      const sorted = [...classSet].sort((a, b) => a - b)
-      this.#nClasses = sorted.length
-      this.#classes = new Int32Array(sorted)
-    }
+    this.#nFeatures = input.cols
 
     // Create xLearn handle
     const handlePtr = wasm._malloc(4)
@@ -158,7 +260,7 @@ class XLearnBase {
     })
 
     // Set parameters
-    this.#applyParams(wasm, handle)
+    this.#applyParams(wasm, handle, seed)
 
     // Train
     const modelBufPtr = wasm._malloc(4)
@@ -202,7 +304,14 @@ class XLearnBase {
 
   predict(X) {
     this.#ensureFitted()
-    return this.#rawPredict(X)
+    const margins = this.#rawPredict(X)
+    if (this.#task !== 'binary') return margins
+
+    const labels = new Int32Array(margins.length)
+    for (let i = 0; i < margins.length; i++) {
+      labels[i] = this.#classes[margins[i] > 0 ? 1 : 0]
+    }
+    return labels
   }
 
   predictProba(X) {
@@ -231,13 +340,14 @@ class XLearnBase {
     const preds = this.predict(X)
     const yArr = normalizeY(y)
 
+    if (yArr.length !== preds.length) {
+      throw new Error(`y length (${yArr.length}) does not match prediction rows (${preds.length})`)
+    }
+
     if (this.#task === 'binary') {
-      // Accuracy (apply threshold to raw margins for classifier)
       let correct = 0
       for (let i = 0; i < preds.length; i++) {
-        const predClass = preds[i] > 0 ? 1 : 0
-        const trueClass = yArr[i] > 0 ? 1 : 0
-        if (predClass === trueClass) correct++
+        if (preds[i] === yArr[i]) correct++
       }
       return correct / preds.length
     } else {
@@ -263,7 +373,7 @@ class XLearnBase {
     ]
 
     // FFM field map
-    if (this.#algo === 'ffm' && this.#featureFields) {
+    if (this.#algo === 'ffm') {
       const fieldBytes = new Uint8Array(this.#featureFields.buffer,
         this.#featureFields.byteOffset, this.#featureFields.byteLength)
       artifacts.push({ id: 'field_map', data: fieldBytes })
@@ -277,44 +387,145 @@ class XLearnBase {
       classes: this.#classes ? Array.from(this.#classes) : null
     }
 
+    if (this.#task === 'binary') {
+      metadata.labelEncoding = 'sorted-int32-sign-v1'
+    }
+
+    const bundleParams = this.getParams()
+    // field_map is the sole serialized source of truth. Typed arrays are not
+    // valid manifest JSON and duplicating the map risks divergent state.
+    delete bundleParams.featureFields
+    bundleParams.seed = this.#fittedSeed
+
     return encodeBundle(
-      { typeId: this._typeId, params: this.getParams(), metadata },
+      {
+        typeId: this._typeId,
+        params: bundleParams,
+        seed: this.#fittedSeed,
+        metadata
+      },
       artifacts
     )
   }
 
   static async _load(bytes, TypeClass) {
-    const { manifest, toc, blobs } = decodeBundle(bytes)
+    const { manifest, toc, blobs } = validateBundle(bytes)
     return TypeClass._fromBundle(manifest, toc, blobs)
   }
 
   static async _fromBundle(manifest, toc, blobs, TypeClass) {
     await loadXLearn()
 
-    const entry = toc.find(e => e.id === 'model')
-    if (!entry) throw new Error('Bundle missing "model" artifact')
-    const modelData = new Uint8Array(entry.length)
-    modelData.set(blobs.subarray(entry.offset, entry.offset + entry.length))
+    const spec = TypeClass.bundleSpec
+    if (!spec || !spec.typeIds.includes(manifest.typeId)) {
+      throw new Error(
+        `${TypeClass.name} cannot load bundle type ${JSON.stringify(manifest.typeId)}`
+      )
+    }
 
     const meta = manifest.metadata || {}
-    const params = manifest.params || {}
+    if (meta.algo !== spec.algo || meta.task !== spec.task) {
+      throw new Error(
+        `${TypeClass.name} bundle metadata does not match ${spec.algo}/${spec.task}`
+      )
+    }
+    if (!Number.isInteger(meta.nFeatures) || meta.nFeatures < 1) {
+      throw new Error(`${TypeClass.name} bundle has invalid nFeatures`)
+    }
+    if (spec.task === 'binary') {
+      if (meta.nClasses !== 2 || !Array.isArray(meta.classes) || meta.classes.length !== 2 ||
+          !meta.classes.every(value => Number.isInteger(value) &&
+            value >= -2147483648 && value <= 2147483647) ||
+          meta.classes[0] >= meta.classes[1]) {
+        throw new Error(`${TypeClass.name} bundle has invalid binary class metadata`)
+      }
+      if (manifest.typeId.endsWith('@2') &&
+          meta.labelEncoding !== 'sorted-int32-sign-v1') {
+        throw new Error(`${TypeClass.name} @2 bundle has invalid label encoding`)
+      }
+      if (manifest.typeId.endsWith('@1') &&
+          !(meta.classes[0] <= 0 && meta.classes[1] > 0)) {
+        throw new Error(
+          `${TypeClass.name} legacy @1 bundle used an ambiguous same-sign label mapping; retrain the model`
+        )
+      }
+    } else if (meta.nClasses !== 0 || meta.classes != null) {
+      throw new Error(`${TypeClass.name} regressor bundle has classifier metadata`)
+    }
+
+    const modelEntries = toc.filter(e => e.id === 'model')
+    const fieldEntries = toc.filter(e => e.id === 'field_map')
+    const ffmWithMap = spec.algo === 'ffm' &&
+      fieldEntries.length === 1 && toc.length === 2
+    if (modelEntries.length !== 1 ||
+        !(toc.length === 1 || ffmWithMap) ||
+        toc.some(entry => entry.mediaType !== 'application/octet-stream') ||
+        toc.some(entry => entry.id !== 'model' && entry.id !== 'field_map') ||
+        (spec.algo !== 'ffm' && fieldEntries.length !== 0)) {
+      throw new Error(`${TypeClass.name} bundle has an invalid artifact set`)
+    }
+    const entry = modelEntries[0]
+    const modelData = new Uint8Array(entry.length)
+    modelData.set(blobs.subarray(entry.offset, entry.offset + entry.length))
+    const modelIdentity = parseModelHeader(modelData)
+    const expectedLoss = spec.task === 'binary' ? 'cross-entropy' : 'squared'
+    if (modelIdentity.algo !== spec.algo || modelIdentity.loss !== expectedLoss ||
+        modelIdentity.nFeatures !== meta.nFeatures) {
+      throw new Error(`${TypeClass.name} model blob identity does not match its bundle`)
+    }
+
+    const params = { ...(manifest.params || {}) }
+    // Legacy writers persisted a requested params.seed but never forwarded it;
+    // without the top-level seed contract the effective upstream seed was 1.
+    const resolvedSeed = manifest.seed === undefined ? 1 : params.seed
+    if (!Number.isInteger(resolvedSeed) || resolvedSeed < 1 ||
+        resolvedSeed > 2147483647) {
+      throw new Error(`${TypeClass.name} bundle has invalid seed`)
+    }
+    if (manifest.seed !== undefined && manifest.seed !== resolvedSeed) {
+      throw new Error(`${TypeClass.name} bundle seed does not match params.seed`)
+    }
+    if (manifest.typeId.endsWith('@2') && manifest.seed === undefined) {
+      throw new Error(`${TypeClass.name} @2 bundle is missing its training seed`)
+    }
+    params.seed = resolvedSeed
 
     const instance = new TypeClass(LOAD_SENTINEL, meta.algo, meta.task, params)
     instance.#modelBytes = modelData
     instance.#nFeatures = meta.nFeatures || 0
     instance.#nClasses = meta.nClasses || 0
     instance.#classes = meta.classes ? new Int32Array(meta.classes) : null
+    instance.#fittedSeed = resolvedSeed
 
     // Load field_map if present
-    const fieldEntry = toc.find(e => e.id === 'field_map')
+    const fieldEntry = fieldEntries[0]
     if (fieldEntry) {
+      if (spec.algo !== 'ffm') {
+        throw new Error('Non-FFM bundle must not contain a field_map artifact')
+      }
+      if (fieldEntry.length % Int32Array.BYTES_PER_ELEMENT !== 0 ||
+          fieldEntry.length / Int32Array.BYTES_PER_ELEMENT !== meta.nFeatures) {
+        throw new Error('field_map artifact length must match nFeatures')
+      }
       const raw = blobs.subarray(fieldEntry.offset, fieldEntry.offset + fieldEntry.length)
       instance.#featureFields = new Int32Array(raw.buffer.slice(
         raw.byteOffset, raw.byteOffset + raw.byteLength
       ))
-      if (params.featureFields === undefined) {
-        params.featureFields = instance.#featureFields
+      for (let i = 0; i < instance.#featureFields.length; i++) {
+        if (instance.#featureFields[i] < 0 ||
+            instance.#featureFields[i] >= modelIdentity.nFields) {
+          throw new Error(`field_map contains an invalid field ID at index ${i}`)
+        }
       }
+      params.featureFields = instance.#featureFields
+    } else if (spec.algo === 'ffm') {
+      if (manifest.typeId.endsWith('@2')) {
+        throw new Error('FFM @2 bundle missing "field_map" artifact')
+      }
+      instance.#featureFields = new Int32Array(meta.nFeatures)
+      params.featureFields = instance.#featureFields
+    } else {
+      delete params.featureFields
     }
 
     // Create handle for prediction
@@ -378,9 +589,6 @@ class XLearnBase {
 
   setParams(p) {
     Object.assign(this.#params, p)
-    if (p.featureFields !== undefined) {
-      this.#featureFields = p.featureFields
-    }
     return this
   }
 
@@ -410,13 +618,17 @@ class XLearnBase {
 
   #rawPredict(X) {
     const wasm = getWasm()
+    const input = this.#prepareMatrixInput(X)
+    if (input.cols !== this.#nFeatures) {
+      throw new Error(`X has ${input.cols} features; model expects ${this.#nFeatures}`)
+    }
 
     // Build DMatrix for query
     let dmatrix, rows
-    if (isCSR(X)) {
-      ({ dmatrix, rows } = this.#buildCSRDMatrix(wasm, X, null))
+    if (input.csr) {
+      ({ dmatrix, rows } = this.#buildCSRDMatrix(wasm, input.matrix, null))
     } else {
-      ({ dmatrix, rows } = this.#buildDenseDMatrix(wasm, X, null))
+      ({ dmatrix, rows } = this.#buildDenseDMatrix(wasm, input.matrix, null))
     }
 
     // Write model bytes to WASM heap
@@ -456,7 +668,7 @@ class XLearnBase {
   }
 
   #buildDenseDMatrix(wasm, X, y) {
-    const { data: xData, rows, cols } = normalizeX(X)
+    const { data: xData, rows, cols } = X
 
     // xLearn uses float32 internally
     const xF32 = new Float32Array(xData.length)
@@ -470,7 +682,9 @@ class XLearnBase {
     if (y) {
       const yF32 = new Float32Array(y.length)
       if (this.#task === 'binary') {
-        for (let i = 0; i < y.length; i++) yF32[i] = y[i] > 0 ? 1 : -1
+        for (let i = 0; i < y.length; i++) {
+          yF32[i] = y[i] === this.#classes[1] ? 1 : -1
+        }
       } else {
         for (let i = 0; i < y.length; i++) yF32[i] = y[i]
       }
@@ -480,7 +694,7 @@ class XLearnBase {
 
     // Field map for FFM
     let fieldPtr = 0
-    const featureFields = this.#params.featureFields || this.#featureFields
+    const featureFields = this.#algo === 'ffm' ? this.#featureFields : null
     if (featureFields) {
       this.#featureFields = featureFields
       fieldPtr = wasm._malloc(featureFields.length * 4)
@@ -534,7 +748,9 @@ class XLearnBase {
     if (y) {
       const yF32 = new Float32Array(y.length)
       if (this.#task === 'binary') {
-        for (let i = 0; i < y.length; i++) yF32[i] = y[i] > 0 ? 1 : -1
+        for (let i = 0; i < y.length; i++) {
+          yF32[i] = y[i] === this.#classes[1] ? 1 : -1
+        }
       } else {
         for (let i = 0; i < y.length; i++) yF32[i] = y[i]
       }
@@ -544,7 +760,7 @@ class XLearnBase {
 
     // Field map
     let fieldPtr = 0
-    const featureFields = this.#params.featureFields || this.#featureFields
+    const featureFields = this.#algo === 'ffm' ? this.#featureFields : null
     if (featureFields) {
       this.#featureFields = featureFields
       fieldPtr = wasm._malloc(featureFields.length * 4)
@@ -577,7 +793,7 @@ class XLearnBase {
     return { dmatrix, rows, cols }
   }
 
-  #applyParams(wasm, handle) {
+  #applyParams(wasm, handle, seed) {
     const p = this.#params
 
     const setStr = (key, val) => {
@@ -616,6 +832,109 @@ class XLearnBase {
     if (p.lambda_1 !== undefined) setFloat('lambda_1', p.lambda_1)
     if (p.lambda_2 !== undefined) setFloat('lambda_2', p.lambda_2)
     if (p.normalize !== undefined) setBool('norm', p.normalize)
+    setInt('seed', seed)
+  }
+
+  #prepareMatrixInput(X) {
+    const csrShaped = X && typeof X === 'object' && !Array.isArray(X) &&
+      ('indices' in X || 'indptr' in X)
+    if (csrShaped) {
+      if (!isCSR(X)) {
+        throw new Error('CSR indices and indptr must be Int32Array values')
+      }
+      const { rows, cols, data, indices, indptr } = X
+      if (!Number.isInteger(rows) || rows < 1 ||
+          !Number.isInteger(cols) || cols < 1) {
+        throw new Error(`Invalid CSR dimensions: rows=${rows}, cols=${cols}`)
+      }
+      if (!(data instanceof Float32Array) && !(data instanceof Float64Array)) {
+        throw new Error('CSR data must be Float32Array or Float64Array')
+      }
+      if (data.length !== indices.length) {
+        throw new Error(`CSR data length (${data.length}) does not match indices length (${indices.length})`)
+      }
+      if (indptr.length !== rows + 1 || indptr[0] !== 0 ||
+          indptr[indptr.length - 1] !== data.length) {
+        throw new Error('CSR indptr must start at 0, end at nnz, and have rows + 1 entries')
+      }
+      for (let i = 0; i < data.length; i++) {
+        if (!Number.isFinite(data[i])) {
+          throw new Error(`CSR data must be finite, got ${data[i]} at index ${i}`)
+        }
+        if (indices[i] < 0 || indices[i] >= cols) {
+          throw new Error(`CSR column index ${indices[i]} is out of bounds at index ${i}`)
+        }
+      }
+      for (let i = 1; i < indptr.length; i++) {
+        if (indptr[i] < indptr[i - 1]) {
+          throw new Error(`CSR indptr must be nondecreasing at index ${i}`)
+        }
+      }
+      return { csr: true, matrix: X, rows, cols }
+    }
+
+    if (Array.isArray(X)) {
+      if (X.length === 0 || !Array.isArray(X[0]) || X[0].length === 0) {
+        throw new Error('Dense matrix must contain at least one row and one column')
+      }
+      const expectedCols = X[0].length
+      for (let i = 0; i < X.length; i++) {
+        if (!Array.isArray(X[i]) || X[i].length !== expectedCols) {
+          throw new Error(`Dense matrix row ${i} has inconsistent length`)
+        }
+      }
+    }
+    const matrix = normalizeX(X)
+    const { data, rows, cols } = matrix
+    if (!Number.isInteger(rows) || rows < 1 ||
+        !Number.isInteger(cols) || cols < 1 || data.length !== rows * cols) {
+      throw new Error(`Invalid dense matrix shape: rows=${rows}, cols=${cols}, data.length=${data.length}`)
+    }
+    for (let i = 0; i < data.length; i++) {
+      if (!Number.isFinite(data[i])) {
+        throw new Error(`Dense matrix data must be finite, got ${data[i]} at index ${i}`)
+      }
+    }
+    return { csr: false, matrix, rows, cols }
+  }
+
+  #prepareFeatureFields(cols) {
+    const provided = this.#params.featureFields
+    if (this.#algo !== 'ffm') {
+      if (provided !== undefined) {
+        throw new Error('featureFields is supported only by FFM models')
+      }
+      return null
+    }
+
+    if (provided === undefined || provided === null) {
+      return new Int32Array(cols)
+    }
+    if (!(provided instanceof Int32Array)) {
+      throw new Error('featureFields must be an Int32Array')
+    }
+    if (provided.length !== cols) {
+      throw new Error(`featureFields length (${provided.length}) does not match X columns (${cols})`)
+    }
+    const fields = new Int32Array(provided.length)
+    const compactIds = new Map()
+    for (let i = 0; i < fields.length; i++) {
+      const field = provided[i]
+      if (field < 0) {
+        throw new Error(`featureFields contains a negative field ID at index ${i}`)
+      }
+      if (!compactIds.has(field)) compactIds.set(field, compactIds.size)
+      fields[i] = compactIds.get(field)
+    }
+    return fields
+  }
+
+  #resolvedSeed() {
+    const seed = this.#params.seed === undefined ? 1 : this.#params.seed
+    if (!Number.isInteger(seed) || seed < 1 || seed > 2147483647) {
+      throw new Error(`seed must be an integer in [1, 2147483647], got ${seed}`)
+    }
+    return seed
   }
 
   #ensureNotDisposed() {

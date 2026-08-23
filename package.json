@@ -1,6 +1,6 @@
 {
   "name": "@wlearn/xlearn",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "xLearn (LR/FM/FFM) compiled to WebAssembly -- factorization machines for CTR and sparse data in browsers and Node.js",
   "type": "commonjs",
   "main": "src/index.js",
@@ -16,8 +16,7 @@
     "dist/",
     "LICENSE",
     "NOTICE",
-    "README.md",
-    "CHANGELOG.md"
+    "README.md"
   ],
   "sideEffects": false,
   "publishConfig": {
@@ -28,11 +27,12 @@
     "build": "bash scripts/build-wasm.sh",
     "verify": "bash scripts/verify-exports.sh",
     "build:browser": "bash scripts/build-browser.sh",
+    "test:browser": "npm run build:browser && node test/test-browser.js",
     "prepack": "node scripts/prepack.js",
     "prepublishOnly": "node scripts/prepublish.js"
   },
   "dependencies": {
-    "@wlearn/core": "0.2.0"
+    "@wlearn/core": "^0.3.0"
   },
   "keywords": [
     "xlearn",

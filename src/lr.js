@@ -2,6 +2,11 @@ const { XLearnBase, LOAD_SENTINEL } = require('./base.js')
 const { register } = require('@wlearn/core')
 
 class XLearnLRClassifier extends XLearnBase {
+  static bundleSpec = {
+    algo: 'linear', task: 'binary',
+    typeIds: ['wlearn.xlearn.lr.classifier@1', 'wlearn.xlearn.lr.classifier@2']
+  }
+
   static async create(params = {}) {
     return XLearnBase._create('linear', 'binary', params, XLearnLRClassifier)
   }
@@ -14,7 +19,7 @@ class XLearnLRClassifier extends XLearnBase {
     return XLearnBase._fromBundle(manifest, toc, blobs, XLearnLRClassifier)
   }
 
-  get _typeId() { return 'wlearn.xlearn.lr.classifier@1' }
+  get _typeId() { return 'wlearn.xlearn.lr.classifier@2' }
 
   get capabilities() {
     return {
@@ -35,6 +40,11 @@ class XLearnLRClassifier extends XLearnBase {
 }
 
 class XLearnLRRegressor extends XLearnBase {
+  static bundleSpec = {
+    algo: 'linear', task: 'reg',
+    typeIds: ['wlearn.xlearn.lr.regressor@1']
+  }
+
   static async create(params = {}) {
     return XLearnBase._create('linear', 'reg', params, XLearnLRRegressor)
   }
@@ -68,6 +78,7 @@ class XLearnLRRegressor extends XLearnBase {
 }
 
 register('wlearn.xlearn.lr.classifier@1', (m, t, b) => XLearnLRClassifier._fromBundle(m, t, b))
+register('wlearn.xlearn.lr.classifier@2', (m, t, b) => XLearnLRClassifier._fromBundle(m, t, b))
 register('wlearn.xlearn.lr.regressor@1', (m, t, b) => XLearnLRRegressor._fromBundle(m, t, b))
 
 module.exports = { XLearnLRClassifier, XLearnLRRegressor }

@@ -1,4 +1,4 @@
-const { decodeBundle, load: coreLoad } = require('@wlearn/core')
+const { decodeBundle, encodeBundle, load: coreLoad } = require('@wlearn/core')
 
 let passed = 0
 let failed = 0
@@ -26,6 +26,52 @@ function assert(condition, msg) {
 function assertClose(a, b, tol, msg) {
   const diff = Math.abs(a - b)
   if (diff > tol) throw new Error(msg || `expected ${a} ~ ${b} (diff=${diff}, tol=${tol})`)
+}
+
+async function expectReject(promise, pattern) {
+  let error = null
+  try {
+    await promise
+  } catch (caught) {
+    error = caught
+  }
+  assert(error, 'expected operation to reject')
+  if (pattern) {
+    assert(pattern.test(error.message), `unexpected error: ${error.message}`)
+  }
+}
+
+function rewriteBundle(bytes, mutateManifest, mutateArtifacts = artifacts => artifacts) {
+  const { manifest, toc, blobs } = decodeBundle(bytes)
+  const nextManifest = JSON.parse(JSON.stringify(manifest))
+  mutateManifest(nextManifest)
+  const artifacts = toc.map(entry => ({
+    id: entry.id,
+    data: new Uint8Array(blobs.slice(entry.offset, entry.offset + entry.length)),
+    mediaType: entry.mediaType
+  }))
+  return encodeBundle(nextManifest, mutateArtifacts(artifacts))
+}
+
+function bundleArtifact(bytes, id) {
+  const { toc, blobs } = decodeBundle(bytes)
+  const entry = toc.find(item => item.id === id)
+  assert(entry, `missing ${id} artifact`)
+  return new Uint8Array(blobs.slice(entry.offset, entry.offset + entry.length))
+}
+
+function modelScalarOffsets(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  let offset = 0
+  for (let i = 0; i < 2; i++) {
+    const length = view.getUint32(offset, true)
+    offset += 4 + length
+  }
+  const nFeatures = offset
+  return {
+    nFeatures,
+    nWeights: nFeatures + 4 * 4
+  }
 }
 
 // Deterministic data generation
@@ -82,7 +128,8 @@ function toCSR(X) {
 async function main() {
 
 const {
-  loadXLearn,
+  loadXLearn, getWasm,
+  XLearnLR, XLearnFM, XLearnFFM,
   XLearnLRClassifier, XLearnLRRegressor,
   XLearnFMClassifier, XLearnFMRegressor,
   XLearnFFMClassifier, XLearnFFMRegressor
@@ -122,11 +169,10 @@ await test('LR classifier: create, fit, predict', async () => {
   assert(m.nClasses === 2, `nClasses=${m.nClasses}`)
 
   const preds = m.predict(X)
-  assert(preds instanceof Float64Array, 'should be Float64Array')
+  assert(preds instanceof Int32Array, 'classifier predict should return Int32Array labels')
   assert(preds.length === 80, `expected 80, got ${preds.length}`)
-  // Raw margins -- should be numbers, not NaN
   for (let i = 0; i < preds.length; i++) {
-    assert(!isNaN(preds[i]), `prediction ${i} is NaN`)
+    assert(preds[i] === 0 || preds[i] === 1, `unexpected class label ${preds[i]}`)
   }
 
   const acc = m.score(X, y)
@@ -294,7 +340,7 @@ await test('FM classifier: save/load round-trip', async () => {
   const bytes = m.save()
 
   const { manifest, toc } = decodeBundle(bytes)
-  assert(manifest.typeId === 'wlearn.xlearn.fm.classifier@1', `typeId=${manifest.typeId}`)
+  assert(manifest.typeId === 'wlearn.xlearn.fm.classifier@2', `typeId=${manifest.typeId}`)
   assert(toc.length === 1, `expected 1 TOC entry, got ${toc.length}`)
   assert(toc[0].id === 'model', `expected TOC entry "model", got ${toc[0].id}`)
 
@@ -399,7 +445,8 @@ await test('FFM classifier: save/load preserves field_map', async () => {
   const bytes = m.save()
 
   const { manifest, toc } = decodeBundle(bytes)
-  assert(manifest.typeId === 'wlearn.xlearn.ffm.classifier@1', `typeId=${manifest.typeId}`)
+  assert(manifest.typeId === 'wlearn.xlearn.ffm.classifier@2', `typeId=${manifest.typeId}`)
+  assert(manifest.params.featureFields === undefined, 'featureFields must not be duplicated in manifest params')
   // FFM should have both model and field_map artifacts
   assert(toc.length === 2, `expected 2 TOC entries, got ${toc.length}`)
   const fieldEntry = toc.find(e => e.id === 'field_map')
@@ -412,11 +459,10 @@ await test('FFM classifier: save/load preserves field_map', async () => {
   for (let i = 0; i < p1.length; i++) {
     assertClose(p1[i], p2[i], 0.1, `pred ${i}: ${p1[i]} !== ${p2[i]}`)
   }
-  // Verify sign agreement (classification direction preserved)
   for (let i = 0; i < p1.length; i++) {
-    assert(Math.sign(p1[i]) === Math.sign(p2[i]) || Math.abs(p1[i]) < 0.1,
-      `sign mismatch at ${i}: ${p1[i]} vs ${p2[i]}`)
+    assert(p1[i] === p2[i], `label mismatch at ${i}: ${p1[i]} vs ${p2[i]}`)
   }
+  assert(m2.getParams().featureFields instanceof Int32Array, 'loaded field map should be Int32Array')
   m2.dispose()
 })
 
@@ -643,12 +689,14 @@ await test('bundle manifest has required fields', async () => {
 
   const bytes = m.save()
   const { manifest } = decodeBundle(bytes)
-  assert(manifest.typeId === 'wlearn.xlearn.fm.classifier@1', `typeId=${manifest.typeId}`)
+  assert(manifest.typeId === 'wlearn.xlearn.fm.classifier@2', `typeId=${manifest.typeId}`)
   assert(manifest.metadata, 'missing metadata')
   assert(manifest.metadata.algo === 'fm', `algo=${manifest.metadata.algo}`)
   assert(manifest.metadata.task === 'binary', `task=${manifest.metadata.task}`)
   assert(manifest.metadata.nFeatures === 2, `nFeatures=${manifest.metadata.nFeatures}`)
   assert(manifest.metadata.nClasses === 2, `nClasses=${manifest.metadata.nClasses}`)
+  assert(manifest.metadata.labelEncoding === 'sorted-int32-sign-v1', 'missing label encoding')
+  assert(manifest.seed === 1, `seed=${manifest.seed}`)
 
   m.dispose()
 })
@@ -752,8 +800,10 @@ await test('decisionFunction returns raw margins', async () => {
   const preds = m.predict(X)
 
   assert(df.length === preds.length, 'length mismatch')
+  assert(df instanceof Float64Array, 'decisionFunction should return Float64Array margins')
   for (let i = 0; i < df.length; i++) {
-    assert(df[i] === preds[i], `df[${i}]=${df[i]} !== predict[${i}]=${preds[i]}`)
+    const expected = m.classes[df[i] > 0 ? 1 : 0]
+    assert(preds[i] === expected, `margin/label mismatch at ${i}`)
   }
 
   m.dispose()
@@ -779,27 +829,32 @@ await test('same model predicts consistently', async () => {
   m.dispose()
 })
 
-await test('separate training runs produce similar predictions', async () => {
+await test('seed makes LR/FM/FFM training reproducible within one WASM instance', async () => {
   const { X, y } = makeLinearData(60)
+  for (const Cls of [XLearnLRClassifier, XLearnFMClassifier, XLearnFFMClassifier]) {
+    const runs = []
+    for (const seed of [42, 42, 43, 42]) {
+      const m = await Cls.create({ epoch: 10, k: 4, seed })
+      m.fit(X, y)
+      runs.push({ margins: m.decisionFunction(X), bundle: m.save() })
+      m.dispose()
+    }
 
-  const m1 = await XLearnLRClassifier.create({ epoch: 10 })
-  m1.fit(X, y)
-  const p1 = m1.predict(X)
-  const s1 = m1.score(X, y)
-  m1.dispose()
+    for (const sameSeedRun of [runs[1], runs[3]]) {
+      assert(Buffer.from(runs[0].bundle).equals(Buffer.from(sameSeedRun.bundle)),
+        `${Cls.name} bundle differs for the same seed`)
+      for (let i = 0; i < runs[0].margins.length; i++) {
+        assert(runs[0].margins[i] === sameSeedRun.margins[i],
+          `${Cls.name} margin differs at ${i}`)
+      }
+    }
 
-  const m2 = await XLearnLRClassifier.create({ epoch: 10 })
-  m2.fit(X, y)
-  const p2 = m2.predict(X)
-  const s2 = m2.score(X, y)
-  m2.dispose()
-
-  // xLearn has minor non-determinism from WASM heap layout, but
-  // predictions should be close and classification direction should agree
-  for (let i = 0; i < p1.length; i++) {
-    assertClose(p1[i], p2[i], 0.5, `pred ${i}: ${p1[i]} vs ${p2[i]} too different`)
+    let different = false
+    for (let i = 0; i < runs[0].margins.length; i++) {
+      if (runs[0].margins[i] !== runs[2].margins[i]) different = true
+    }
+    assert(different, `${Cls.name} different seed did not change a nondegenerate fit`)
   }
-  assert(s1 === s2, `scores should match: ${s1} !== ${s2}`)
 })
 
 // ============================================================
@@ -830,6 +885,337 @@ await test('score returns R-squared for regressor', async () => {
   assert(r2 > 0.2, `R-squared ${r2} too low`)
 
   m.dispose()
+})
+
+// ============================================================
+// Contract and bundle boundaries
+// ============================================================
+console.log('\n=== Contract and Bundle Boundaries ===')
+
+await test('classifier maps arbitrary int32 labels for dense and CSR input', async () => {
+  const { X, y } = makeLinearData(80)
+  const publicY = new Int32Array(y.map(value => value ? 20 : 10))
+  const m = await XLearnLRClassifier.create({ epoch: 15, seed: 42 })
+
+  m.fit(X, publicY)
+  assert(Array.from(m.classes).join(',') === '10,20', `classes=${Array.from(m.classes)}`)
+  const densePreds = m.predict(X)
+  const margins = m.decisionFunction(X)
+  for (let i = 0; i < densePreds.length; i++) {
+    assert(densePreds[i] === (margins[i] > 0 ? 20 : 10), `dense label ${i}`)
+  }
+
+  m.fit(toCSR(X), publicY)
+  const sparsePreds = m.predict(toCSR(X))
+  for (const value of sparsePreds) {
+    assert(value === 10 || value === 20, `unexpected sparse label ${value}`)
+  }
+  m.dispose()
+})
+
+await test('classifier label validation is transactional on refit', async () => {
+  const { X, y } = makeLinearData(40)
+  const m = await XLearnFMClassifier.create({ epoch: 10, k: 4, seed: 7 })
+  m.fit(X, y)
+  const before = m.decisionFunction(X)
+
+  let threw = false
+  try { m.fit(X, y.slice(0, -1)) } catch (error) {
+    threw = /y length/.test(error.message)
+  }
+  assert(threw, 'short y must be rejected before C')
+  const after = m.decisionFunction(X)
+  for (let i = 0; i < before.length; i++) {
+    assert(before[i] === after[i], `fitted model changed at ${i}`)
+  }
+  m.dispose()
+})
+
+await test('classifier rejects non-int32 and non-binary labels', async () => {
+  const { X } = makeLinearData(4)
+  const m = await XLearnLRClassifier.create()
+  let badFloat = false
+  let oneClass = false
+  try { m.fit(X, [0, 1, 0.5, 1]) } catch (error) { badFloat = /int32/.test(error.message) }
+  try { m.fit(X, [3, 3, 3, 3]) } catch (error) { oneClass = /exactly 2/.test(error.message) }
+  assert(badFloat, 'fractional class must be rejected')
+  assert(oneClass, 'one-class fit must be rejected')
+  m.dispose()
+})
+
+await test('FFM canonicalizes absent fields and validates provided fields', async () => {
+  const { X, y } = makeLinearData(40)
+  const m = await XLearnFFMClassifier.create({ epoch: 8, k: 4 })
+  m.fit(X, y)
+  const bytes = m.save()
+  const { toc, blobs } = decodeBundle(bytes)
+  const fieldEntry = toc.find(entry => entry.id === 'field_map')
+  assert(fieldEntry && fieldEntry.length === 8, 'canonical two-feature field map missing')
+  const fields = new Int32Array(blobs.buffer.slice(
+    blobs.byteOffset + fieldEntry.offset,
+    blobs.byteOffset + fieldEntry.offset + fieldEntry.length
+  ))
+  assert(fields[0] === 0 && fields[1] === 0, `implicit fields=${Array.from(fields)}`)
+  m.dispose()
+
+  const loaded = await XLearnFFMClassifier.load(bytes)
+  assert(Array.from(loaded.getParams().featureFields).join(',') === '0,0', 'loaded implicit fields differ')
+  loaded.dispose()
+
+  for (const featureFields of [new Int32Array([0]), new Int32Array([0, -1]), [0, 1]]) {
+    const invalid = await XLearnFFMClassifier.create({ featureFields })
+    let rejected = false
+    try { invalid.fit(X, y) } catch (error) { rejected = /featureFields/.test(error.message) }
+    assert(rejected, `invalid featureFields accepted: ${featureFields}`)
+    invalid.dispose()
+  }
+
+  const compact = await XLearnFFMClassifier.create({
+    epoch: 3,
+    k: 4,
+    featureFields: new Int32Array([7, 2147483647])
+  })
+  compact.fit(X, y)
+  const compactBytes = compact.save()
+  compact.dispose()
+  const compactFields = new Int32Array(bundleArtifact(compactBytes, 'field_map').buffer)
+  assert(Array.from(compactFields).join(',') === '0,1',
+    `gapped fields were not compacted: ${Array.from(compactFields)}`)
+  const compactLoaded = await XLearnFFMClassifier.load(compactBytes)
+  assert(Array.from(compactLoaded.getParams().featureFields).join(',') === '0,1',
+    'compacted fields changed on load')
+  compactLoaded.dispose()
+
+  const invalidFieldMap = rewriteBundle(
+    compactBytes,
+    () => {},
+    artifacts => artifacts.map(artifact => artifact.id === 'field_map'
+      ? { ...artifact, data: new Uint8Array(new Int32Array([0, 2]).buffer) }
+      : artifact)
+  )
+  await expectReject(
+    XLearnFFMClassifier.load(invalidFieldMap),
+    /invalid field ID/
+  )
+})
+
+await test('non-FFM models reject featureFields', async () => {
+  const { X, y } = makeLinearData(20)
+  const m = await XLearnLRClassifier.create({ featureFields: new Int32Array([0, 1]) })
+  let rejected = false
+  try { m.fit(X, y) } catch (error) { rejected = /only by FFM/.test(error.message) }
+  assert(rejected, 'LR silently accepted featureFields')
+  m.dispose()
+})
+
+await test('seed is validated, forwarded to WASM, and persisted', async () => {
+  const { X, y } = makeLinearData(80)
+  const wasm = getWasm()
+  const originalSetInt = wasm._wl_xl_set_int
+  const observed = []
+  wasm._wl_xl_set_int = (handle, keyPtr, value) => {
+    let end = keyPtr
+    while (wasm.HEAPU8[end] !== 0) end++
+    const key = new TextDecoder().decode(wasm.HEAPU8.subarray(keyPtr, end))
+    observed.push([key, value])
+    return originalSetInt(handle, keyPtr, value)
+  }
+
+  let bytes
+  try {
+    const m = await XLearnFMClassifier.create({ epoch: 12, k: 4, seed: 42 })
+    m.fit(X, y)
+    bytes = m.save()
+    m.dispose()
+  } finally {
+    wasm._wl_xl_set_int = originalSetInt
+  }
+  assert(observed.some(([key, value]) => key === 'seed' && value === 42), 'seed did not cross the WASM setter boundary')
+  const { manifest } = decodeBundle(bytes)
+  assert(manifest.seed === 42 && manifest.params.seed === 42, 'training seed not persisted')
+
+  const invalid = await XLearnFMClassifier.create({ seed: 0 })
+  let rejected = false
+  try { invalid.fit(X, y) } catch (error) { rejected = /seed must/.test(error.message) }
+  assert(rejected, 'seed=0 must be rejected')
+  invalid.dispose()
+})
+
+await test('direct load verifies artifact hashes', async () => {
+  const { X, y } = makeLinearData(30)
+  const m = await XLearnLRClassifier.create({ epoch: 5 })
+  m.fit(X, y)
+  const tampered = new Uint8Array(m.save())
+  tampered[tampered.length - 1] ^= 1
+  m.dispose()
+  await expectReject(XLearnLRClassifier.load(tampered), /SHA-256 mismatch/)
+})
+
+await test('split and unified loaders preserve task identity', async () => {
+  const clsData = makeLinearData(40)
+  const regData = makeRegressionData(40)
+  const cls = await XLearnFMClassifier.create({ epoch: 5, k: 4 })
+  const reg = await XLearnFMRegressor.create({ epoch: 5, k: 4 })
+  cls.fit(clsData.X, clsData.y)
+  reg.fit(regData.X, regData.y)
+  const clsBytes = cls.save()
+  const regBytes = reg.save()
+  cls.dispose()
+  reg.dispose()
+
+  await expectReject(XLearnFMClassifier.load(regBytes), /cannot load bundle type/)
+  await expectReject(XLearnFMRegressor.load(clsBytes), /cannot load bundle type/)
+
+  const unifiedReg = await XLearnFM.load(regBytes)
+  assert(unifiedReg.task === 'regression', `unified task=${unifiedReg.task}`)
+  assert(unifiedReg.predict(regData.X) instanceof Float64Array, 'unified regressor prediction type')
+  unifiedReg.dispose()
+})
+
+await test('legacy classifier @1 loads and resaves as corrected @2', async () => {
+  const { X, y } = makeLinearData(40)
+  const m = await XLearnLRClassifier.create({ epoch: 6, seed: 42 })
+  m.fit(X, y)
+  const legacy = rewriteBundle(m.save(), manifest => {
+    manifest.typeId = 'wlearn.xlearn.lr.classifier@1'
+    delete manifest.metadata.labelEncoding
+    delete manifest.seed
+  })
+  m.dispose()
+
+  const loaded = await XLearnLRClassifier.load(legacy)
+  for (const label of loaded.predict(X)) assert(label === 0 || label === 1, `legacy label=${label}`)
+  const upgraded = decodeBundle(loaded.save()).manifest
+  assert(upgraded.typeId === 'wlearn.xlearn.lr.classifier@2', 'legacy resave not upgraded')
+  assert(upgraded.seed === 1 && upgraded.params.seed === 1, 'legacy no-op requested seed was not normalized')
+  loaded.dispose()
+})
+
+await test('legacy classifier rejects ambiguous same-sign class metadata', async () => {
+  const { X, y } = makeLinearData(30)
+  const m = await XLearnLRClassifier.create({ epoch: 5 })
+  m.fit(X, y)
+  const ambiguous = rewriteBundle(m.save(), manifest => {
+    manifest.typeId = 'wlearn.xlearn.lr.classifier@1'
+    manifest.metadata.classes = [10, 20]
+    delete manifest.metadata.labelEncoding
+    delete manifest.seed
+    delete manifest.params.seed
+  })
+  m.dispose()
+  await expectReject(XLearnLRClassifier.load(ambiguous), /ambiguous same-sign label mapping/)
+})
+
+await test('FFM legacy missing field map defaults to field zero; @2 rejects it', async () => {
+  const { X, y } = makeLinearData(30)
+  const m = await XLearnFFMClassifier.create({ epoch: 5, k: 4 })
+  m.fit(X, y)
+  const current = m.save()
+  m.dispose()
+
+  const withoutFields = (typeId) => rewriteBundle(current, manifest => {
+    manifest.typeId = typeId
+    if (typeId.endsWith('@1')) {
+      delete manifest.metadata.labelEncoding
+      delete manifest.seed
+      delete manifest.params.seed
+    }
+  }, artifacts => artifacts.filter(artifact => artifact.id !== 'field_map'))
+
+  const legacy = await XLearnFFMClassifier.load(withoutFields('wlearn.xlearn.ffm.classifier@1'))
+  assert(Array.from(legacy.getParams().featureFields).join(',') === '0,0', 'legacy fields not synthesized')
+  legacy.dispose()
+  await expectReject(
+    XLearnFFMClassifier.load(withoutFields('wlearn.xlearn.ffm.classifier@2')),
+    /missing "field_map"/
+  )
+})
+
+await test('bundle rejects inconsistent seed metadata', async () => {
+  const { X, y } = makeLinearData(30)
+  const m = await XLearnLRClassifier.create({ epoch: 5, seed: 3 })
+  m.fit(X, y)
+  const inconsistent = rewriteBundle(m.save(), manifest => { manifest.seed = 4 })
+  m.dispose()
+  await expectReject(XLearnLRClassifier.load(inconsistent), /seed does not match/)
+})
+
+await test('bundle rejects model blobs whose algorithm or loss disagrees with the manifest', async () => {
+  const { X, y } = makeLinearData(30)
+  const regression = makeRegressionData(30)
+  const families = [
+    [XLearnLRClassifier, XLearnLRRegressor],
+    [XLearnFMClassifier, XLearnFMRegressor]
+  ]
+  const classifierBundles = []
+  for (const [Classifier, Regressor] of families) {
+    const classifier = await Classifier.create({ epoch: 3, seed: 7 })
+    const regressor = await Regressor.create({ epoch: 3, seed: 7 })
+    classifier.fit(X, y)
+    regressor.fit(regression.X, regression.y)
+    const classifierBundle = classifier.save()
+    classifierBundles.push(classifierBundle)
+    const regressorModel = bundleArtifact(regressor.save(), 'model')
+    const wrongLoss = rewriteBundle(
+      classifierBundle,
+      () => {},
+      artifacts => artifacts.map(artifact => artifact.id === 'model'
+        ? { ...artifact, data: regressorModel }
+        : artifact)
+    )
+    await expectReject(Classifier.load(wrongLoss), /blob identity/)
+    classifier.dispose()
+    regressor.dispose()
+  }
+
+  const fmModel = bundleArtifact(classifierBundles[1], 'model')
+  const wrongAlgorithm = rewriteBundle(
+    classifierBundles[0],
+    () => {},
+    artifacts => artifacts.map(artifact => artifact.id === 'model'
+      ? { ...artifact, data: fmModel }
+      : artifact)
+  )
+  await expectReject(XLearnLRClassifier.load(wrongAlgorithm), /blob identity/)
+})
+
+await test('bundle rejects truncated and count-inconsistent model blobs before native use', async () => {
+  const { X, y } = makeLinearData(30)
+  const model = await XLearnLRClassifier.create({ epoch: 3, seed: 7 })
+  model.fit(X, y)
+  const bundle = model.save()
+  model.dispose()
+  const raw = bundleArtifact(bundle, 'model')
+  const offsets = modelScalarOffsets(raw)
+
+  const cases = [
+    raw.subarray(0, offsets.nFeatures + 4),
+    (() => {
+      const changed = Uint8Array.from(raw)
+      const view = new DataView(changed.buffer)
+      view.setUint32(offsets.nWeights, view.getUint32(offsets.nWeights, true) + 1, true)
+      return changed
+    })(),
+    (() => {
+      const changed = new Uint8Array(raw.length + 1)
+      changed.set(raw)
+      return changed
+    })()
+  ]
+
+  for (const modelBytes of cases) {
+    const malformed = rewriteBundle(
+      bundle,
+      () => {},
+      artifacts => artifacts.map(artifact => artifact.id === 'model'
+        ? { ...artifact, data: modelBytes }
+        : artifact)
+    )
+    await expectReject(
+      XLearnLRClassifier.load(malformed),
+      /truncated|inconsistent/
+    )
+  }
 })
 
 // ============================================================

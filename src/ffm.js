@@ -2,6 +2,11 @@ const { XLearnBase, LOAD_SENTINEL } = require('./base.js')
 const { register } = require('@wlearn/core')
 
 class XLearnFFMClassifier extends XLearnBase {
+  static bundleSpec = {
+    algo: 'ffm', task: 'binary',
+    typeIds: ['wlearn.xlearn.ffm.classifier@1', 'wlearn.xlearn.ffm.classifier@2']
+  }
+
   static async create(params = {}) {
     return XLearnBase._create('ffm', 'binary', params, XLearnFFMClassifier)
   }
@@ -14,7 +19,7 @@ class XLearnFFMClassifier extends XLearnBase {
     return XLearnBase._fromBundle(manifest, toc, blobs, XLearnFFMClassifier)
   }
 
-  get _typeId() { return 'wlearn.xlearn.ffm.classifier@1' }
+  get _typeId() { return 'wlearn.xlearn.ffm.classifier@2' }
 
   get capabilities() {
     return {
@@ -36,6 +41,11 @@ class XLearnFFMClassifier extends XLearnBase {
 }
 
 class XLearnFFMRegressor extends XLearnBase {
+  static bundleSpec = {
+    algo: 'ffm', task: 'reg',
+    typeIds: ['wlearn.xlearn.ffm.regressor@1']
+  }
+
   static async create(params = {}) {
     return XLearnBase._create('ffm', 'reg', params, XLearnFFMRegressor)
   }
@@ -70,6 +80,7 @@ class XLearnFFMRegressor extends XLearnBase {
 }
 
 register('wlearn.xlearn.ffm.classifier@1', (m, t, b) => XLearnFFMClassifier._fromBundle(m, t, b))
+register('wlearn.xlearn.ffm.classifier@2', (m, t, b) => XLearnFFMClassifier._fromBundle(m, t, b))
 register('wlearn.xlearn.ffm.regressor@1', (m, t, b) => XLearnFFMRegressor._fromBundle(m, t, b))
 
 module.exports = { XLearnFFMClassifier, XLearnFFMRegressor }

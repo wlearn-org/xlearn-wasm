@@ -13,6 +13,7 @@ npm install @wlearn/xlearn
 ## Quick start
 
 ```js
+const { readFileSync, writeFileSync } = require('fs')
 const { XLearnFM } = require('@wlearn/xlearn')
 
 const model = await XLearnFM.create({
@@ -29,22 +30,20 @@ model.fit(
 )
 
 // Predict
-const preds = model.predict([[1, 0], [0, 1]])         // Float64Array (raw margins)
+const preds = model.predict([[1, 0], [0, 1]])          // Int32Array class labels
+const margins = model.decisionFunction([[1, 0], [0, 1]]) // Float64Array
 const probs = model.predictProba([[1, 0], [0, 1]])     // Float64Array (nrow * 2)
 const accuracy = model.score([[1, 0], [0, 1]], [1, 0])
 
 // Save / load
-const buf = model.save()  // Uint8Array (WLRN bundle)
-const model2 = await XLearnFMClassifier.load(buf)
-
-// Clean up -- required, WASM memory is not garbage collected
-model.dispose()
-model2.dispose()
+writeFileSync('xlearn-fm.wlrn', model.save())
+const model2 = await XLearnFM.load(readFileSync('xlearn-fm.wlrn'))
+model2.predict([[1, 0]])
 ```
 
 ## Model types
 
-Three unified model classes (recommended), plus six split classes for backward compatibility:
+Three unified model classes (recommended), plus six task-specific classes:
 
 | Unified Class | Algorithm | Split Classes |
 |---------------|-----------|---------------|
@@ -56,7 +55,7 @@ Unified classes accept `task: 'classification'` or `task: 'regression'` and auto
 
 ## FFM with field mapping
 
-FFM requires a feature-to-field mapping. Pass `featureFields` as an `Int32Array` where each entry maps a feature index to its field ID:
+For meaningful field-aware interactions, pass `featureFields` as a nonnegative `Int32Array` where each entry maps one feature index to its field ID:
 
 ```js
 const { XLearnFFMClassifier } = require('@wlearn/xlearn')
@@ -73,7 +72,9 @@ const model = await XLearnFFMClassifier.create({
 model.fit(X, y)
 ```
 
-The field map is preserved in save/load bundles as a separate `field_map` artifact.
+The map length must equal the number of input features. If omitted, every feature
+belongs to field 0. The resolved map is preserved in save/load bundles as a
+separate `field_map` artifact.
 
 ## Sparse input (CSR)
 
@@ -104,19 +105,23 @@ Async factory. Loads WASM module on first call, returns a ready-to-use model.
 
 Train on data. Returns `this`.
 - `X` -- `number[][]`, `{ data: Float64Array, rows, cols }`, or CSR matrix
-- `y` -- `number[]` or `Float64Array`
+- classifier `y` -- exactly two arbitrary int32-valued classes; class order is sorted
+- regressor `y` -- finite numeric targets
 
-### `model.predict(X)` -> `Float64Array`
+### `model.predict(X)` -> `Int32Array | Float64Array`
 
-Returns raw margins (classifier) or values (regressor).
+Returns public class labels as `Int32Array` for classifiers and numeric values as
+`Float64Array` for regressors.
 
 ### `model.predictProba(X)` -> `Float64Array`
 
-Returns flat array of shape `nrow * 2` (columns: P(class 0), P(class 1)). Classifiers only.
+Returns a flat array of shape `nrow * 2`. Its columns follow the sorted order in
+`model.classes`. Classifiers only.
 
 ### `model.decisionFunction(X)` -> `Float64Array`
 
-Returns raw decision values. Same as `predict()`.
+Returns raw decision margins. For a classifier, a margin greater than zero maps
+to `model.classes[1]`; other margins map to `model.classes[0]`.
 
 ### `model.score(X, y)` -> `number`
 
@@ -128,7 +133,7 @@ Save to / load from `Uint8Array` (WLRN bundle with xLearn binary model blob).
 
 ### `model.dispose()`
 
-Free WASM memory. Required. Idempotent.
+Release WASM memory immediately. Use in long-running apps, workers, cross-validation, and AutoML loops. Idempotent.
 
 ### `model.getParams()` / `model.setParams(p)`
 
@@ -152,7 +157,40 @@ Returns default hyperparameter search space for AutoML.
 | `lambda_1` | float | 0.0 | FTRL L1 penalty |
 | `lambda_2` | float | 0.0 | FTRL L2 penalty |
 | `normalize` | bool | true | Instance-wise L2 normalization |
-| `featureFields` | Int32Array | null | Feature-to-field map (FFM only) |
+| `seed` | int >= 1 | 1 | Data-shuffle seed; saved in the model bundle |
+| `featureFields` | Int32Array | all zeros | Nonnegative feature-to-field map (FFM only) |
+
+## Classifier migration from 0.2
+
+The 0.2 package returned raw margins from classifier `predict()`. Current
+classifier bundles use `wlearn.xlearn.*.classifier@2`, and `predict()` follows
+the common wlearn estimator contract by returning public labels. Code that needs
+margins should call `decisionFunction()`.
+
+Legacy `@1` classifier bundles remain loadable when they were trained with
+contract-valid integer labels whose lower class is nonpositive and upper class
+is positive, such as `[0, 1]` or `[-1, 1]`. The old writer could not distinguish
+two same-sign public classes; such bundles are rejected with a retraining error
+instead of silently producing incorrect labels.
+
+## Regression target scale
+
+xLearn's squared-loss optimizer operates on the target values supplied to it and
+can be sensitive to their scale. This wrapper does not silently transform `y`.
+For large-magnitude targets, compute scaling statistics on the training targets,
+fit on the transformed targets, and apply the inverse transform to predictions:
+
+```js
+const mean = yTrain.reduce((sum, value) => sum + value, 0) / yTrain.length
+const variance = yTrain.reduce((sum, value) => sum + (value - mean) ** 2, 0) / yTrain.length
+const scale = Math.sqrt(variance) || 1
+const yScaled = yTrain.map(value => (value - mean) / scale)
+
+model.fit(XTrain, yScaled)
+const predictions = Float64Array.from(
+  model.predict(XTest), value => value * scale + mean
+)
+```
 
 ## Capabilities
 
@@ -168,7 +206,7 @@ Returns default hyperparameter search space for AutoML.
 
 ## Resource management
 
-WASM heap memory is not garbage collected. Call `.dispose()` on every model when done. A `FinalizationRegistry` safety net warns if you forget, but do not rely on it.
+Use `.dispose()` when creating and discarding many models so WASM memory is released promptly.
 
 ## Build from source
 
@@ -205,6 +243,11 @@ Modifications for WASM:
 - **stdout suppression**: xLearn prints verbose banners and progress to stdout even with `quiet=true`. The C adapter redirects fd 1 to `/dev/null` via `dup2` during fit/predict and restores it afterward.
 
 - **SSE to WASM SIMD**: xLearn's FM/FFM scoring uses SSE3 intrinsics for vectorized dot products. Built with `-msimd128 -msse3` for Emscripten's SSE-to-WASM SIMD translation layer.
+
+- **Deterministic shuffling**: Emscripten's parameterless `std::random_shuffle`
+  does not consume the state set by `srand()`. The WASM build uses
+  `std::shuffle` with an explicit `std::mt19937` seeded from the public `seed`
+  parameter, making repeated LR/FM/FFM fits reproducible within a runtime.
 
 ## License
 

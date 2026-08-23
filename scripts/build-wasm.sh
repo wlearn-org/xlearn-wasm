@@ -26,10 +26,13 @@ fi
 echo "=== Applying patches ==="
 
 # Patch copies under build/ so the upstream submodule stays clean.
-mkdir -p "${PATCH_DIR}/src/solver" "${PATCH_DIR}/src/base"
+mkdir -p "${PATCH_DIR}/src/solver" "${PATCH_DIR}/src/base" \
+  "${PATCH_DIR}/src/reader"
 cp "${UPSTREAM_DIR}/src/solver/solver.cc" "${PATCH_DIR}/src/solver/solver.cc"
 cp "${UPSTREAM_DIR}/src/solver/checker.cc" "${PATCH_DIR}/src/solver/checker.cc"
 cp "${UPSTREAM_DIR}/src/base/file_util.h" "${PATCH_DIR}/src/base/file_util.h"
+cp "${UPSTREAM_DIR}/src/reader/reader.h" "${PATCH_DIR}/src/reader/reader.h"
+cp "${UPSTREAM_DIR}/src/reader/reader.cc" "${PATCH_DIR}/src/reader/reader.cc"
 
 # Patch 1: Replace exit() with throw in solver.cc and checker.cc
 # (exit() would kill the WASM process; throw gets caught by API_BEGIN/API_END)
@@ -48,6 +51,18 @@ if grep -q 'pos + kChunkSize, end' "${PATCH_DIR}/src/base/file_util.h" 2>/dev/nu
   echo "  Patching std::min type mismatch in file_util.h"
   sed -i 's/std::min(pos + kChunkSize, end)/std::min(pos + (long)kChunkSize, end)/g' "${PATCH_DIR}/src/base/file_util.h"
 fi
+
+# Patch 3: libc++ random_shuffle ignores srand() and uses process-global state.
+# Use an explicit engine so the public xLearn seed controls every data shuffle.
+echo "  Patching seeded data shuffles"
+sed -i '/#include <algorithm>/a #include <random>' "${PATCH_DIR}/src/reader/reader.h"
+sed -i '/#include <algorithm>/a #include <random>' "${PATCH_DIR}/src/reader/reader.cc"
+sed -i 's/srand(this->seed_);/std::mt19937 generator(this->seed_);/g' \
+  "${PATCH_DIR}/src/reader/reader.h"
+sed -i 's/srand(this->seed_+1);/std::mt19937 generator(this->seed_ + 1);/g' \
+  "${PATCH_DIR}/src/reader/reader.cc"
+sed -i 's/random_shuffle(order_\.begin(), order_\.end());/std::shuffle(order_.begin(), order_.end(), generator);/g' \
+  "${PATCH_DIR}/src/reader/reader.h" "${PATCH_DIR}/src/reader/reader.cc"
 
 echo "=== Compiling WASM ==="
 mkdir -p "$OUTPUT_DIR"
@@ -70,7 +85,7 @@ SOURCES=(
   "${UPSTREAM_DIR}/src/loss/squared_loss.cc"
   "${UPSTREAM_DIR}/src/reader/file_splitor.cc"
   "${UPSTREAM_DIR}/src/reader/parser.cc"
-  "${UPSTREAM_DIR}/src/reader/reader.cc"
+  "${PATCH_DIR}/src/reader/reader.cc"
   "${UPSTREAM_DIR}/src/score/ffm_score.cc"
   "${UPSTREAM_DIR}/src/score/fm_score.cc"
   "${UPSTREAM_DIR}/src/score/linear_score.cc"
