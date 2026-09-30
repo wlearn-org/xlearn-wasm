@@ -58,6 +58,7 @@ Unified classes accept `task: 'classification'` or `task: 'regression'` and auto
 For meaningful field-aware interactions, pass `featureFields` as a nonnegative `Int32Array` where each entry maps one feature index to its field ID:
 
 ```js
+// X must have 6 columns.
 const { XLearnFFMClassifier } = require('@wlearn/xlearn')
 
 // Features 0-2 belong to field 0, features 3-5 belong to field 1
